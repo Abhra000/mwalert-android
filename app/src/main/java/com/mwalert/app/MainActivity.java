@@ -1,0 +1,396 @@
+package com.mwalert.app;
+
+import android.Manifest;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.PowerManager;
+import android.provider.Settings;
+import android.text.method.LinkMovementMethod;
+import android.text.Html;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ClickableSpan;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+
+public class MainActivity extends AppCompatActivity {
+
+    public static final String PREFS = "mwalert_prefs";
+    public static final String KEY_TOKEN = "token";
+    public static final String KEY_SERVER = "server";
+    public static final String KEY_EMAIL = "email";
+
+    private SharedPreferences prefs;
+    private LinearLayout loginLayout;
+    private LinearLayout dashboardLayout;
+    private EditText serverInput, emailInput, passwordInput;
+    private TextView statusText, jobsText, msgText;
+    private Button loginBtn, logoutBtn, batteryBtn;
+
+    private static final int REQ_NOTIFICATION = 1001;
+
+    private final android.os.Handler refreshHandler = new android.os.Handler();
+    private final Runnable refreshRunnable = new Runnable() {
+        @Override
+        public void run() {
+            loadJobs();
+            refreshHandler.postDelayed(this, 5000);
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+
+        buildUI();
+
+        // Auto-login if token saved
+        if (prefs.getString(KEY_TOKEN, "").length() > 0) {
+            showDashboard();
+        } else {
+            showLogin();
+        }
+
+        // Request notification permission on Android 13+
+        requestNotifPermission();
+    }
+
+    private void requestNotifPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATION);
+            }
+        }
+    }
+
+    private void buildUI() {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(40, 60, 40, 40);
+        root.setBackgroundColor(0xFF0F0C29);
+        scroll.addView(root);
+
+        TextView title = new TextView(this);
+        title.setText("MW Alert");
+        title.setTextSize(36);
+        title.setTextColor(0xFF00F2FE);
+        title.setGravity(android.view.Gravity.CENTER);
+        title.setPadding(0, 20, 0, 4);
+        root.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("MICROWORKERS MONITOR");
+        subtitle.setTextSize(11);
+        subtitle.setTextColor(0xFF888888);
+        subtitle.setLetterSpacing(0.2f);
+        subtitle.setGravity(android.view.Gravity.CENTER);
+        subtitle.setPadding(0, 0, 0, 30);
+        root.addView(subtitle);
+
+        // === LOGIN LAYOUT ===
+        loginLayout = new LinearLayout(this);
+        loginLayout.setOrientation(LinearLayout.VERTICAL);
+
+        addLabel(loginLayout, "SERVER URL (ngrok)");
+        serverInput = addInput(loginLayout, "abc123.ngrok-free.dev",
+                prefs.getString(KEY_SERVER, ""));
+
+        addLabel(loginLayout, "EMAIL");
+        emailInput = addInput(loginLayout, "you@example.com",
+                prefs.getString(KEY_EMAIL, ""));
+
+        addLabel(loginLayout, "PASSWORD");
+        passwordInput = addInput(loginLayout, "••••••••", "");
+        passwordInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+
+        loginBtn = new Button(this);
+        loginBtn.setText("Sign In");
+        loginBtn.setTextColor(0xFFFFFFFF);
+        loginBtn.setBackgroundColor(0xFF667EEA);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 130);
+        lp.setMargins(0, 30, 0, 10);
+        loginBtn.setLayoutParams(lp);
+        loginBtn.setOnClickListener(v -> doLogin());
+        loginLayout.addView(loginBtn);
+
+        msgText = new TextView(this);
+        msgText.setTextColor(0xFFFF6B6B);
+        msgText.setPadding(0, 16, 0, 0);
+        msgText.setGravity(android.view.Gravity.CENTER);
+        loginLayout.addView(msgText);
+
+        root.addView(loginLayout);
+
+        // === DASHBOARD LAYOUT ===
+        dashboardLayout = new LinearLayout(this);
+        dashboardLayout.setOrientation(LinearLayout.VERTICAL);
+        dashboardLayout.setVisibility(View.GONE);
+
+        statusText = new TextView(this);
+        statusText.setText("● Connected — background polling active");
+        statusText.setTextColor(0xFF4ADE80);
+        statusText.setTextSize(13);
+        statusText.setPadding(20, 16, 20, 16);
+        statusText.setBackgroundColor(0x1A4ADE80);
+        dashboardLayout.addView(statusText);
+
+        TextView jobsHeader = new TextView(this);
+        jobsHeader.setText("\nRECENT MATCHED JOBS\n");
+        jobsHeader.setTextSize(13);
+        jobsHeader.setTextColor(0xFFAAAAAA);
+        jobsHeader.setLetterSpacing(0.1f);
+        dashboardLayout.addView(jobsHeader);
+
+        jobsText = new TextView(this);
+        jobsText.setText("Waiting for jobs...");
+        jobsText.setTextColor(0xFFCCCCCC);
+        jobsText.setTextSize(13);
+        jobsText.setLineSpacing(6f, 1f);
+        dashboardLayout.addView(jobsText);
+
+        batteryBtn = new Button(this);
+        batteryBtn.setText("Disable Battery Optimization");
+        batteryBtn.setTextColor(0xFFFFFFFF);
+        batteryBtn.setBackgroundColor(0xFFFF9500);
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 120);
+        bp.setMargins(0, 30, 0, 10);
+        batteryBtn.setLayoutParams(bp);
+        batteryBtn.setOnClickListener(v -> requestBatteryOptOff());
+        dashboardLayout.addView(batteryBtn);
+
+        logoutBtn = new Button(this);
+        logoutBtn.setText("Logout");
+        logoutBtn.setTextColor(0xFFFF6B6B);
+        logoutBtn.setBackgroundColor(0x33FF6B6B);
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 110);
+        lp2.setMargins(0, 14, 0, 30);
+        logoutBtn.setLayoutParams(lp2);
+        logoutBtn.setOnClickListener(v -> logout());
+        dashboardLayout.addView(logoutBtn);
+
+        root.addView(dashboardLayout);
+
+        setContentView(scroll);
+    }
+
+    private void addLabel(LinearLayout parent, String text) {
+        TextView lbl = new TextView(this);
+        lbl.setText(text);
+        lbl.setTextColor(0xFF888888);
+        lbl.setTextSize(11);
+        lbl.setLetterSpacing(0.15f);
+        lbl.setPadding(0, 18, 0, 6);
+        parent.addView(lbl);
+    }
+
+    private EditText addInput(LinearLayout parent, String hint, String defaultValue) {
+        EditText e = new EditText(this);
+        e.setHint(hint);
+        e.setText(defaultValue);
+        e.setTextColor(0xFFFFFFFF);
+        e.setHintTextColor(0xFF555555);
+        e.setBackgroundColor(0xFF1A1A2E);
+        e.setPadding(28, 28, 28, 28);
+        e.setSingleLine(true);
+        parent.addView(e);
+        return e;
+    }
+
+    private void showLogin() {
+        loginLayout.setVisibility(View.VISIBLE);
+        dashboardLayout.setVisibility(View.GONE);
+        msgText.setText("");
+    }
+
+    private void showDashboard() {
+        loginLayout.setVisibility(View.GONE);
+        dashboardLayout.setVisibility(View.VISIBLE);
+        // Start background polling service
+        startPollingService();
+        // Start in-app refresh
+        refreshHandler.removeCallbacks(refreshRunnable);
+        refreshHandler.post(refreshRunnable);
+    }
+
+    private void doLogin() {
+        String server = serverInput.getText().toString().trim();
+        String email = emailInput.getText().toString().trim();
+        String password = passwordInput.getText().toString();
+
+        if (server.isEmpty() || email.isEmpty() || password.isEmpty()) {
+            msgText.setText("All fields required");
+            return;
+        }
+
+        msgText.setText("Connecting...");
+        msgText.setTextColor(0xFFAAAAAA);
+        loginBtn.setEnabled(false);
+
+        // Build URL
+        String apiBase = ApiHelper.buildApiBase(server);
+
+        new Thread(() -> {
+            try {
+                String body = new JSONObject()
+                        .put("email", email)
+                        .put("password", password)
+                        .toString();
+
+                String resp = ApiHelper.post(apiBase + "/api/login", body, null);
+                JSONObject json = new JSONObject(resp);
+
+                if (json.has("token")) {
+                    String token = json.getString("token");
+                    prefs.edit()
+                            .putString(KEY_TOKEN, token)
+                            .putString(KEY_SERVER, server)
+                            .putString(KEY_EMAIL, email)
+                            .apply();
+                    runOnUiThread(() -> {
+                        msgText.setText("✓ Welcome!");
+                        msgText.setTextColor(0xFF4ADE80);
+                        loginBtn.setEnabled(true);
+                        showDashboard();
+                    });
+                } else {
+                    String err = json.optString("error", "Login failed");
+                    runOnUiThread(() -> {
+                        msgText.setText(err);
+                        msgText.setTextColor(0xFFFF6B6B);
+                        loginBtn.setEnabled(true);
+                    });
+                }
+            } catch (Exception ex) {
+                runOnUiThread(() -> {
+                    msgText.setText("Connection failed: " + ex.getMessage());
+                    msgText.setTextColor(0xFFFF6B6B);
+                    loginBtn.setEnabled(true);
+                });
+            }
+        }).start();
+    }
+
+    private void loadJobs() {
+        String token = prefs.getString(KEY_TOKEN, "");
+        String server = prefs.getString(KEY_SERVER, "");
+        if (token.isEmpty() || server.isEmpty()) return;
+
+        String apiBase = ApiHelper.buildApiBase(server);
+
+        new Thread(() -> {
+            try {
+                String resp = ApiHelper.get(apiBase + "/api/jobs", token);
+                JSONObject json = new JSONObject(resp);
+                JSONArray jobs = json.optJSONArray("jobs");
+                if (jobs == null) return;
+
+                StringBuilder sb = new StringBuilder();
+                if (jobs.length() == 0) {
+                    sb.append("No matching jobs yet — monitoring...");
+                } else {
+                    int max = Math.min(jobs.length(), 30);
+                    for (int i = 0; i < max; i++) {
+                        JSONObject j = jobs.getJSONObject(i);
+                        sb.append("$").append(j.optString("payment", "?"))
+                                .append(" — ").append(j.optString("title", ""))
+                                .append("\n").append(j.optString("found_at", ""))
+                                .append("\n\n");
+                    }
+                }
+                String text = sb.toString();
+                runOnUiThread(() -> {
+                    jobsText.setText(text);
+                    statusText.setText("● Connected • " + jobs.length() + " jobs • bg polling");
+                    statusText.setTextColor(0xFF4ADE80);
+                });
+            } catch (Exception ex) {
+                runOnUiThread(() -> {
+                    statusText.setText("● Disconnected — check ngrok");
+                    statusText.setTextColor(0xFFFF6B6B);
+                });
+            }
+        }).start();
+    }
+
+    private void startPollingService() {
+        Intent serviceIntent = new Intent(this, PollingService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent);
+        } else {
+            startService(serviceIntent);
+        }
+    }
+
+    private void requestBatteryOptOff() {
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "Open Settings → Apps → MW Alert → Battery → Unrestricted",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void logout() {
+        prefs.edit().remove(KEY_TOKEN).apply();
+        // Stop background service
+        stopService(new Intent(this, PollingService.class));
+        refreshHandler.removeCallbacks(refreshRunnable);
+        showLogin();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (dashboardLayout != null && dashboardLayout.getVisibility() == View.VISIBLE) {
+            refreshHandler.post(refreshRunnable);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        refreshHandler.removeCallbacks(refreshRunnable);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+}
