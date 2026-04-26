@@ -49,6 +49,15 @@ public class ApiHelper {
         }
     }
 
+    /** Plain GET with no auth headers (used for fetching Netlify config.json) */
+    public static String getRaw(String url) throws IOException {
+        Request req = new Request.Builder().url(url).build();
+        try (Response resp = client.newCall(req).execute()) {
+            if (resp.body() == null) return "{}";
+            return resp.body().string();
+        }
+    }
+
     public static String post(String url, String body, String token) throws IOException {
         RequestBody rb = RequestBody.create(body, JSON);
         Request.Builder reqBuilder = new Request.Builder()
