@@ -7,13 +7,7 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.PowerManager;
 import android.provider.Settings;
-import android.text.method.LinkMovementMethod;
-import android.text.Html;
-import android.text.SpannableStringBuilder;
-import android.text.Spanned;
-import android.text.style.ClickableSpan;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -30,27 +24,24 @@ import androidx.core.content.ContextCompat;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.IOException;
-import java.util.concurrent.TimeUnit;
-
-import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-import okhttp3.Response;
-
 public class MainActivity extends AppCompatActivity {
 
     public static final String PREFS = "mwalert_prefs";
     public static final String KEY_TOKEN = "token";
     public static final String KEY_SERVER = "server";
     public static final String KEY_EMAIL = "email";
+    public static final String KEY_LAST_SEEN_ID = "last_seen_job_id";
+
+    // === HARDCODED CONFIG SOURCE ===
+    // The APK fetches the current ngrok URL from this Netlify URL's config.json.
+    // Update CONFIG_URL below to YOUR Netlify domain.
+    private static final String CONFIG_URL = "https://mw-alert.netlify.app/config.json";
 
     private SharedPreferences prefs;
     private LinearLayout loginLayout;
     private LinearLayout dashboardLayout;
-    private EditText serverInput, emailInput, passwordInput;
-    private TextView statusText, jobsText, msgText;
+    private EditText emailInput, passwordInput;
+    private TextView statusText, jobsText, msgText, serverInfoText;
     private Button loginBtn, logoutBtn, batteryBtn;
 
     private static final int REQ_NOTIFICATION = 1001;
@@ -76,9 +67,10 @@ public class MainActivity extends AppCompatActivity {
             showDashboard();
         } else {
             showLogin();
+            // Pre-fetch server URL in background
+            fetchServerUrl(null);
         }
 
-        // Request notification permission on Android 13+
         requestNotifPermission();
     }
 
@@ -117,13 +109,9 @@ public class MainActivity extends AppCompatActivity {
         subtitle.setPadding(0, 0, 0, 30);
         root.addView(subtitle);
 
-        // === LOGIN LAYOUT ===
+        // === LOGIN LAYOUT (Email + Password ONLY) ===
         loginLayout = new LinearLayout(this);
         loginLayout.setOrientation(LinearLayout.VERTICAL);
-
-        addLabel(loginLayout, "SERVER URL (ngrok)");
-        serverInput = addInput(loginLayout, "abc123.ngrok-free.dev",
-                prefs.getString(KEY_SERVER, ""));
 
         addLabel(loginLayout, "EMAIL");
         emailInput = addInput(loginLayout, "you@example.com",
@@ -150,6 +138,14 @@ public class MainActivity extends AppCompatActivity {
         msgText.setPadding(0, 16, 0, 0);
         msgText.setGravity(android.view.Gravity.CENTER);
         loginLayout.addView(msgText);
+
+        serverInfoText = new TextView(this);
+        serverInfoText.setText("");
+        serverInfoText.setTextColor(0xFF555555);
+        serverInfoText.setTextSize(11);
+        serverInfoText.setPadding(0, 12, 0, 0);
+        serverInfoText.setGravity(android.view.Gravity.CENTER);
+        loginLayout.addView(serverInfoText);
 
         root.addView(loginLayout);
 
@@ -190,6 +186,26 @@ public class MainActivity extends AppCompatActivity {
         batteryBtn.setLayoutParams(bp);
         batteryBtn.setOnClickListener(v -> requestBatteryOptOff());
         dashboardLayout.addView(batteryBtn);
+
+        Button refreshUrlBtn = new Button(this);
+        refreshUrlBtn.setText("Refresh Server URL");
+        refreshUrlBtn.setTextColor(0xFFFFFFFF);
+        refreshUrlBtn.setBackgroundColor(0xFF667EEA);
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 110);
+        rp.setMargins(0, 14, 0, 10);
+        refreshUrlBtn.setLayoutParams(rp);
+        refreshUrlBtn.setOnClickListener(v -> {
+            Toast.makeText(this, "Fetching latest server URL...", Toast.LENGTH_SHORT).show();
+            fetchServerUrl(server -> {
+                if (server != null) {
+                    Toast.makeText(this, "Updated: " + server, Toast.LENGTH_LONG).show();
+                } else {
+                    Toast.makeText(this, "Could not fetch URL", Toast.LENGTH_LONG).show();
+                }
+            });
+        });
+        dashboardLayout.addView(refreshUrlBtn);
 
         logoutBtn = new Button(this);
         logoutBtn.setText("Logout");
@@ -239,20 +255,53 @@ public class MainActivity extends AppCompatActivity {
     private void showDashboard() {
         loginLayout.setVisibility(View.GONE);
         dashboardLayout.setVisibility(View.VISIBLE);
-        // Start background polling service
         startPollingService();
-        // Start in-app refresh
         refreshHandler.removeCallbacks(refreshRunnable);
         refreshHandler.post(refreshRunnable);
     }
 
+    /**
+     * Fetch current ngrok URL from CONFIG_URL (Netlify config.json),
+     * save it to prefs. Optionally invoke a callback when done.
+     */
+    interface ServerUrlCallback {
+        void onResult(String server);
+    }
+
+    private void fetchServerUrl(ServerUrlCallback cb) {
+        new Thread(() -> {
+            try {
+                String resp = ApiHelper.getRaw(CONFIG_URL);
+                JSONObject json = new JSONObject(resp);
+                String server = json.optString("server", "").trim();
+                if (server.length() > 0) {
+                    prefs.edit().putString(KEY_SERVER, server).apply();
+                    runOnUiThread(() -> {
+                        if (serverInfoText != null) {
+                            serverInfoText.setText("Server: " + server);
+                        }
+                        if (cb != null) cb.onResult(server);
+                    });
+                } else {
+                    runOnUiThread(() -> { if (cb != null) cb.onResult(null); });
+                }
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    if (serverInfoText != null) {
+                        serverInfoText.setText("⚠ Could not fetch server URL");
+                    }
+                    if (cb != null) cb.onResult(null);
+                });
+            }
+        }).start();
+    }
+
     private void doLogin() {
-        String server = serverInput.getText().toString().trim();
         String email = emailInput.getText().toString().trim();
         String password = passwordInput.getText().toString();
 
-        if (server.isEmpty() || email.isEmpty() || password.isEmpty()) {
-            msgText.setText("All fields required");
+        if (email.isEmpty() || password.isEmpty()) {
+            msgText.setText("Email and password required");
             return;
         }
 
@@ -260,16 +309,37 @@ public class MainActivity extends AppCompatActivity {
         msgText.setTextColor(0xFFAAAAAA);
         loginBtn.setEnabled(false);
 
-        // Build URL
-        String apiBase = ApiHelper.buildApiBase(server);
-
+        // Always fetch the latest server URL first, then login
         new Thread(() -> {
+            String server = "";
+            try {
+                String resp = ApiHelper.getRaw(CONFIG_URL);
+                JSONObject json = new JSONObject(resp);
+                server = json.optString("server", "").trim();
+            } catch (Exception ignored) {}
+
+            if (server.isEmpty()) {
+                // Fallback to last-saved server
+                server = prefs.getString(KEY_SERVER, "");
+            }
+
+            if (server.isEmpty()) {
+                runOnUiThread(() -> {
+                    msgText.setText("Server unreachable. Try later.");
+                    msgText.setTextColor(0xFFFF6B6B);
+                    loginBtn.setEnabled(true);
+                });
+                return;
+            }
+
+            prefs.edit().putString(KEY_SERVER, server).apply();
+            String apiBase = ApiHelper.buildApiBase(server);
+
             try {
                 String body = new JSONObject()
                         .put("email", email)
                         .put("password", password)
                         .toString();
-
                 String resp = ApiHelper.post(apiBase + "/api/login", body, null);
                 JSONObject json = new JSONObject(resp);
 
@@ -277,7 +347,6 @@ public class MainActivity extends AppCompatActivity {
                     String token = json.getString("token");
                     prefs.edit()
                             .putString(KEY_TOKEN, token)
-                            .putString(KEY_SERVER, server)
                             .putString(KEY_EMAIL, email)
                             .apply();
                     runOnUiThread(() -> {
@@ -339,7 +408,7 @@ public class MainActivity extends AppCompatActivity {
                 });
             } catch (Exception ex) {
                 runOnUiThread(() -> {
-                    statusText.setText("● Disconnected — check ngrok");
+                    statusText.setText("● Disconnected — server may be down");
                     statusText.setTextColor(0xFFFF6B6B);
                 });
             }
@@ -367,8 +436,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void logout() {
-        prefs.edit().remove(KEY_TOKEN).apply();
-        // Stop background service
+        prefs.edit()
+                .remove(KEY_TOKEN)
+                .remove(KEY_LAST_SEEN_ID)
+                .apply();
         stopService(new Intent(this, PollingService.class));
         refreshHandler.removeCallbacks(refreshRunnable);
         showLogin();
