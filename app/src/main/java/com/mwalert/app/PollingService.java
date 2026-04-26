@@ -22,23 +22,23 @@ import androidx.core.app.NotificationCompat;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.util.HashSet;
-import java.util.Set;
-
 public class PollingService extends Service {
 
     private static final String CHANNEL_ID_FOREGROUND = "mwalert_foreground";
     private static final String CHANNEL_ID_ALERTS = "mwalert_alerts";
     private static final int FOREGROUND_NOTIFICATION_ID = 1;
-    private static final long POLL_INTERVAL_MS = 6000; // 6 sec
+    private static final long POLL_INTERVAL_MS = 6000;             // 6 sec
+    private static final long URL_REFRESH_INTERVAL_MS = 300_000;   // 5 min
+
+    // CONFIG SOURCE — must match MainActivity.CONFIG_URL
+    private static final String CONFIG_URL = "https://mw-alert.netlify.app/config.json";
 
     private Handler handler;
     private Runnable pollRunnable;
+    private Runnable urlRefreshRunnable;
     private PowerManager.WakeLock wakeLock;
     private SharedPreferences prefs;
 
-    // Track which job IDs we've already notified about (so we don't re-notify)
-    private final Set<Integer> notifiedJobIds = new HashSet<>();
     private boolean firstPoll = true;
 
     @Override
@@ -50,24 +50,46 @@ public class PollingService extends Service {
 
         handler = new Handler();
         pollRunnable = this::pollAndReschedule;
+        urlRefreshRunnable = this::refreshUrlAndReschedule;
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // Promote to foreground service immediately
         startForeground(FOREGROUND_NOTIFICATION_ID, buildForegroundNotification());
 
         // Start polling
         handler.removeCallbacks(pollRunnable);
         handler.post(pollRunnable);
 
-        // If service is killed by system, restart it automatically
+        // Start URL refresh loop (every 5 min — picks up ngrok URL changes silently)
+        handler.removeCallbacks(urlRefreshRunnable);
+        handler.postDelayed(urlRefreshRunnable, URL_REFRESH_INTERVAL_MS);
+
         return START_STICKY;
     }
 
     private void pollAndReschedule() {
         new Thread(this::poll).start();
         handler.postDelayed(pollRunnable, POLL_INTERVAL_MS);
+    }
+
+    private void refreshUrlAndReschedule() {
+        new Thread(this::refreshUrl).start();
+        handler.postDelayed(urlRefreshRunnable, URL_REFRESH_INTERVAL_MS);
+    }
+
+    private void refreshUrl() {
+        try {
+            String resp = ApiHelper.getRaw(CONFIG_URL);
+            JSONObject json = new JSONObject(resp);
+            String server = json.optString("server", "").trim();
+            if (server.length() > 0) {
+                String saved = prefs.getString(MainActivity.KEY_SERVER, "");
+                if (!server.equals(saved)) {
+                    prefs.edit().putString(MainActivity.KEY_SERVER, server).apply();
+                }
+            }
+        } catch (Exception ignored) {}
     }
 
     private void poll() {
@@ -83,29 +105,37 @@ public class PollingService extends Service {
             JSONArray jobs = json.optJSONArray("jobs");
             if (jobs == null) return;
 
-            // Build set of current IDs
-            Set<Integer> currentIds = new HashSet<>();
-            for (int i = 0; i < jobs.length(); i++) {
-                currentIds.add(jobs.getJSONObject(i).optInt("id", -1));
-            }
+            int lastSeenId = prefs.getInt(MainActivity.KEY_LAST_SEEN_ID, -1);
+            int highestIdNow = lastSeenId;
 
-            // On first poll, just record everything as "already seen" — no notifications
-            // (otherwise user would get spammed by old jobs every time the service restarts)
-            if (firstPoll) {
-                notifiedJobIds.addAll(currentIds);
+            // On first poll AFTER a clean install, just record the highest ID
+            // and don't notify. (Otherwise user gets buried in old jobs.)
+            if (firstPoll && lastSeenId == -1) {
+                for (int i = 0; i < jobs.length(); i++) {
+                    int id = jobs.getJSONObject(i).optInt("id", -1);
+                    if (id > highestIdNow) highestIdNow = id;
+                }
+                prefs.edit().putInt(MainActivity.KEY_LAST_SEEN_ID, highestIdNow).apply();
                 firstPoll = false;
                 return;
             }
+            firstPoll = false;
 
-            // Find new IDs and notify
+            // Find jobs with ID > lastSeenId — these are genuinely new
+            // (the API returns jobs in DESC order, so newest is first)
             for (int i = 0; i < jobs.length(); i++) {
                 JSONObject j = jobs.getJSONObject(i);
                 int id = j.optInt("id", -1);
                 if (id < 0) continue;
-                if (!notifiedJobIds.contains(id)) {
-                    notifiedJobIds.add(id);
+                if (id > lastSeenId) {
                     showJobNotification(j);
+                    if (id > highestIdNow) highestIdNow = id;
                 }
+            }
+
+            // Persist the new highest ID so we won't re-notify after restart
+            if (highestIdNow > lastSeenId) {
+                prefs.edit().putInt(MainActivity.KEY_LAST_SEEN_ID, highestIdNow).apply();
             }
         } catch (Exception e) {
             // silent fail — try again next poll
@@ -115,7 +145,6 @@ public class PollingService extends Service {
     private void showJobNotification(JSONObject j) {
         String title = j.optString("title", "New job");
         String payment = j.optString("payment", "?");
-        String url = j.optString("url", "");
 
         Intent openAppIntent = new Intent(this, MainActivity.class);
         openAppIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
@@ -138,8 +167,9 @@ public class PollingService extends Service {
                 .setContentIntent(pi);
 
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        // Use unique ID per job so multiple alerts stack
-        int notifId = (int) (System.currentTimeMillis() & 0x7FFFFFFF);
+        // Use job ID as notification ID — deduplicates if Android delivers same one twice
+        int notifId = (int) (j.optInt("id", 0) & 0x7FFFFFFF);
+        if (notifId == 0) notifId = (int) (System.currentTimeMillis() & 0x7FFFFFFF);
         nm.notify(notifId, b.build());
     }
 
@@ -163,7 +193,6 @@ public class PollingService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
 
-            // Foreground service channel (silent)
             NotificationChannel fgChannel = new NotificationChannel(
                     CHANNEL_ID_FOREGROUND, "Background Service",
                     NotificationManager.IMPORTANCE_LOW);
@@ -173,7 +202,6 @@ public class PollingService extends Service {
             fgChannel.enableVibration(false);
             nm.createNotificationChannel(fgChannel);
 
-            // Alerts channel (high priority + sound + vibrate)
             NotificationChannel alertChannel = new NotificationChannel(
                     CHANNEL_ID_ALERTS, "Job Alerts",
                     NotificationManager.IMPORTANCE_HIGH);
@@ -199,24 +227,25 @@ public class PollingService extends Service {
             PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MWAlert::PollingWakeLock");
             wakeLock.acquire();
-        } catch (Exception e) {
-            // ignore
-        }
+        } catch (Exception ignored) {}
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
         handler.removeCallbacks(pollRunnable);
+        handler.removeCallbacks(urlRefreshRunnable);
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
-        // Try to restart ourselves
-        Intent restartIntent = new Intent(this, PollingService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(restartIntent);
-        } else {
-            startService(restartIntent);
+        // Try to restart ourselves if user is still logged in
+        if (prefs != null && !prefs.getString(MainActivity.KEY_TOKEN, "").isEmpty()) {
+            Intent restartIntent = new Intent(this, PollingService.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(restartIntent);
+            } else {
+                startService(restartIntent);
+            }
         }
     }
 
