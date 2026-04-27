@@ -42,6 +42,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".NotificationSettingsActivity"
+            android:exported="false"
+            android:label="Alert Settings"
+            android:parentActivityName=".MainActivity" />
+
         <service
             android:name=".PollingService"
             android:enabled="true"
