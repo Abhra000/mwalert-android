@@ -203,6 +203,21 @@ public class MainActivity extends AppCompatActivity {
         batteryBtn.setOnClickListener(v -> requestBatteryOptOff());
         dashboardLayout.addView(batteryBtn);
 
+        // === BACKGROUND PERMISSIONS HELP ===
+        // Many phones (Xiaomi/Realme/Vivo/Oppo) kill background services
+        // even with battery optimization off. This button shows manufacturer-
+        // specific instructions to unblock notifications when the app is closed.
+        Button helpBtn = new Button(this);
+        helpBtn.setText("⚠️  Notifications not working?");
+        helpBtn.setTextColor(0xFFFFFFFF);
+        helpBtn.setBackgroundColor(0xFFE74C3C);
+        LinearLayout.LayoutParams helpP = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 120);
+        helpP.setMargins(0, 12, 0, 10);
+        helpBtn.setLayoutParams(helpP);
+        helpBtn.setOnClickListener(v -> showBackgroundPermissionsHelp());
+        dashboardLayout.addView(helpBtn);
+
         Button refreshUrlBtn = new Button(this);
         refreshUrlBtn.setText("Refresh Server URL");
         refreshUrlBtn.setTextColor(0xFFFFFFFF);
@@ -423,7 +438,7 @@ public class MainActivity extends AppCompatActivity {
                         JSONObject j = jobs.getJSONObject(i);
                         sb.append("$").append(j.optString("payment", "?"))
                                 .append(" — ").append(j.optString("title", ""))
-                                .append("\n").append(j.optString("found_at", ""))
+                                .append("\n").append(formatTimeIST(j.optString("found_at", "")))
                                 .append("\n\n");
                     }
                 }
@@ -440,6 +455,36 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
         }).start();
+    }
+
+    /**
+     * Convert a UTC timestamp from the server (formats: "2026-04-26 03:40:59"
+     * or ISO-8601) to Asia/Kolkata local time formatted as "26 Apr, 9:10 AM".
+     * If parsing fails, returns the original string unchanged.
+     */
+    private String formatTimeIST(String utcStr) {
+        if (utcStr == null || utcStr.isEmpty()) return "";
+        String s = utcStr.trim().replace('T', ' ');
+        // Strip fractional seconds and any timezone suffix
+        int dot = s.indexOf('.');
+        if (dot > 0) s = s.substring(0, dot);
+        if (s.endsWith("Z")) s = s.substring(0, s.length() - 1);
+
+        java.text.SimpleDateFormat in = new java.text.SimpleDateFormat(
+                "yyyy-MM-dd HH:mm:ss", java.util.Locale.US);
+        in.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+
+        java.text.SimpleDateFormat out = new java.text.SimpleDateFormat(
+                "dd MMM, h:mm a", java.util.Locale.US);
+        out.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Kolkata"));
+
+        try {
+            java.util.Date d = in.parse(s);
+            if (d == null) return utcStr;
+            return out.format(d);
+        } catch (Exception e) {
+            return utcStr;
+        }
     }
 
     private void startPollingService() {
@@ -462,6 +507,112 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "Open Settings → Apps → MW Alert → Battery → Unrestricted",
                     Toast.LENGTH_LONG).show();
         }
+    }
+
+    /**
+     * Shows manufacturer-specific instructions for enabling background
+     * notifications. Indian-market Android phones (Xiaomi/Realme/Vivo/Oppo/
+     * OnePlus/Samsung) aggressively kill background services even with
+     * battery optimization disabled. This dialog tells users exactly which
+     * phone settings to enable based on their device manufacturer.
+     */
+    private void showBackgroundPermissionsHelp() {
+        String brand = (Build.MANUFACTURER + " " + Build.BRAND).toLowerCase();
+        String steps;
+        String brandLabel;
+
+        if (brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco")) {
+            brandLabel = "Xiaomi / Redmi / Poco";
+            steps =
+                "Your phone is one of the most aggressive at killing background apps. " +
+                "Do ALL of these:\n\n" +
+                "1. Settings → Apps → Manage apps → MW Alert\n" +
+                "   • Battery saver → No restrictions\n" +
+                "   • Autostart → Enable\n" +
+                "   • Other permissions → Display pop-up windows while running in background → Allow\n\n" +
+                "2. Settings → Battery → App battery saver → MW Alert → No restrictions\n\n" +
+                "3. Long-press MW Alert in Recents → Lock icon (so it survives Clear All)\n\n" +
+                "4. Security app → Permissions → Autostart → MW Alert → ON";
+        } else if (brand.contains("realme") || brand.contains("oppo")) {
+            brandLabel = "Realme / Oppo";
+            steps =
+                "1. Settings → Apps → App management → MW Alert\n" +
+                "   • Allow background activity → ON\n" +
+                "   • Allow auto-launch → ON\n\n" +
+                "2. Settings → Battery → App battery management → MW Alert\n" +
+                "   • Allow background running → ON\n" +
+                "   • Optimize → OFF\n\n" +
+                "3. Long-press MW Alert in Recents → Lock icon\n\n" +
+                "4. Settings → Notifications & status bar → MW Alert → All ON";
+        } else if (brand.contains("vivo") || brand.contains("iqoo")) {
+            brandLabel = "Vivo / iQOO";
+            steps =
+                "1. Settings → Battery → Background power consumption → MW Alert → Allow\n\n" +
+                "2. Settings → Battery → High background power consumption → MW Alert → Allow\n\n" +
+                "3. Settings → Apps → MW Alert\n" +
+                "   • Auto-start → ON\n" +
+                "   • Allow background pop-up → ON\n\n" +
+                "4. iManager / i-Manager → App manager → Autostart manager → MW Alert → ON\n\n" +
+                "5. Long-press MW Alert in Recents → Lock";
+        } else if (brand.contains("oneplus")) {
+            brandLabel = "OnePlus";
+            steps =
+                "1. Settings → Battery → Battery optimization → MW Alert → Don't optimize\n\n" +
+                "2. Settings → Apps & notifications → MW Alert\n" +
+                "   • Battery → Background activity → Allow\n" +
+                "   • Battery → Battery optimization → Don't optimize\n\n" +
+                "3. Long-press MW Alert in Recents → Lock icon\n\n" +
+                "4. Settings → Apps → MW Alert → Advanced → Auto-start → ON";
+        } else if (brand.contains("samsung")) {
+            brandLabel = "Samsung";
+            steps =
+                "1. Settings → Apps → MW Alert → Battery\n" +
+                "   • Allow background activity → ON\n" +
+                "   • Optimize battery usage → Find MW Alert → OFF\n\n" +
+                "2. Settings → Device care → Battery → Background usage limits\n" +
+                "   • Sleeping apps → Remove MW Alert if listed\n" +
+                "   • Deep sleeping apps → Remove MW Alert if listed\n" +
+                "   • Never sleeping apps → ADD MW Alert\n\n" +
+                "3. Long-press MW Alert in Recents → Lock icon (Keep open)";
+        } else if (brand.contains("huawei") || brand.contains("honor")) {
+            brandLabel = "Huawei / Honor";
+            steps =
+                "1. Settings → Apps → MW Alert → Battery\n" +
+                "   • Launch → Manage manually → Auto-launch ON, Secondary launch ON, Run in background ON\n\n" +
+                "2. Settings → Battery → App launch → MW Alert → Manage manually → all ON\n\n" +
+                "3. Phone Manager → Protected apps → MW Alert → ON\n\n" +
+                "4. Long-press MW Alert in Recents → Lock";
+        } else {
+            brandLabel = "Your phone";
+            steps =
+                "Try these steps in your phone Settings:\n\n" +
+                "1. Settings → Apps → MW Alert\n" +
+                "   • Battery → Unrestricted / Don't optimize\n" +
+                "   • Allow background activity → ON\n" +
+                "   • Auto-start / Auto-launch → ON (if available)\n\n" +
+                "2. Long-press MW Alert in Recents view → tap the Lock icon to prevent the system from clearing it\n\n" +
+                "3. If your phone has a 'Battery saver' or 'Background app limits' feature, exclude MW Alert from it\n\n" +
+                "4. Settings → Notifications → MW Alert → Allow all";
+        }
+
+        String detected = "Detected: " + Build.MANUFACTURER + " " + Build.MODEL +
+                " (Android " + Build.VERSION.RELEASE + ")\n\n";
+
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Background Notifications — " + brandLabel)
+                .setMessage(detected + steps)
+                .setPositiveButton("Open Settings", (d, w) -> {
+                    try {
+                        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                        intent.setData(Uri.parse("package:" + getPackageName()));
+                        startActivity(intent);
+                    } catch (Exception ignored) {
+                        Toast.makeText(this, "Open Settings → Apps → MW Alert manually",
+                                Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setNegativeButton("Close", null)
+                .show();
     }
 
     private void logout() {
