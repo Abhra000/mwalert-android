@@ -199,6 +199,29 @@ public class PollingService extends Service {
     private void showJobNotification(JSONObject j) {
         String title = j.optString("title", "New job");
         String payment = j.optString("payment", "?");
+        String shortLabel = j.optString("short_label", "");
+
+        // Extract slot count "N/M" pattern from title (last occurrence — Microworkers
+        // puts slots at end). Surface it in the notification title so user sees
+        // position WITHOUT expanding.
+        String slotInfo = "";
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("(\\d+)\\s*/\\s*(\\d+)")
+                    .matcher(title);
+            String lastMatch = null;
+            while (m.find()) lastMatch = m.group(1) + "/" + m.group(2);
+            if (lastMatch != null) slotInfo = " • Pos " + lastMatch;
+        } catch (Exception ignored) {}
+
+        // Notification title: 🔔 Email Submit • Pos 0/1000
+        // (short_label tells you WHICH job; position tells you HOW FRESH)
+        String labelPart = (shortLabel != null && !shortLabel.isEmpty())
+                ? shortLabel : "New Job";
+        String notifTitle = "🔔 " + labelPart + slotInfo;
+
+        // Body: $price — full title (so user sees price + full details on expand)
+        String notifBody = "$" + payment + " — " + title;
 
         Intent openAppIntent = new Intent(this, MainActivity.class);
         openAppIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
@@ -210,9 +233,10 @@ public class PollingService extends Service {
 
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, currentAlertChannelId)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("🔔 New Job: $" + payment)
-                .setContentText(title.length() > 100 ? title.substring(0, 100) + "..." : title)
-                .setStyle(new NotificationCompat.BigTextStyle().bigText(title))
+                .setContentTitle(notifTitle)
+                .setContentText(notifBody.length() > 100
+                        ? notifBody.substring(0, 100) + "..." : notifBody)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(notifBody))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setLights(0xFF00F2FE, 1000, 500)
