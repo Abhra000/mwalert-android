@@ -25,7 +25,8 @@ import org.json.JSONObject;
 public class PollingService extends Service {
 
     private static final String CHANNEL_ID_FOREGROUND = "mwalert_foreground";
-    private static final String CHANNEL_ID_ALERTS = "mwalert_alerts";
+    // Channel for alerts — versioned so we can recreate when sound/vibrate settings change
+    private static final String CHANNEL_ID_ALERTS_PREFIX = "mwalert_alerts_v";
     private static final int FOREGROUND_NOTIFICATION_ID = 1;
     private static final long POLL_INTERVAL_MS = 6000;             // 6 sec
     private static final long URL_REFRESH_INTERVAL_MS = 300_000;   // 5 min
@@ -40,12 +41,14 @@ public class PollingService extends Service {
     private SharedPreferences prefs;
 
     private boolean firstPoll = true;
+    private String currentAlertChannelId;
 
     @Override
     public void onCreate() {
         super.onCreate();
         prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE);
-        createNotificationChannels();
+        createForegroundChannel();
+        ensureAlertChannel();
         acquireWakeLock();
 
         handler = new Handler();
@@ -55,13 +58,14 @@ public class PollingService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // Re-check alert channel each time service starts (in case user changed settings)
+        ensureAlertChannel();
+
         startForeground(FOREGROUND_NOTIFICATION_ID, buildForegroundNotification());
 
-        // Start polling
         handler.removeCallbacks(pollRunnable);
         handler.post(pollRunnable);
 
-        // Start URL refresh loop (every 5 min — picks up ngrok URL changes silently)
         handler.removeCallbacks(urlRefreshRunnable);
         handler.postDelayed(urlRefreshRunnable, URL_REFRESH_INTERVAL_MS);
 
@@ -93,6 +97,9 @@ public class PollingService extends Service {
     }
 
     private void poll() {
+        // Re-check alert channel — user may have changed sound while service runs
+        ensureAlertChannel();
+
         String token = prefs.getString(MainActivity.KEY_TOKEN, "");
         String server = prefs.getString(MainActivity.KEY_SERVER, "");
         if (token.isEmpty() || server.isEmpty()) return;
@@ -108,8 +115,6 @@ public class PollingService extends Service {
             int lastSeenId = prefs.getInt(MainActivity.KEY_LAST_SEEN_ID, -1);
             int highestIdNow = lastSeenId;
 
-            // On first poll AFTER a clean install, just record the highest ID
-            // and don't notify. (Otherwise user gets buried in old jobs.)
             if (firstPoll && lastSeenId == -1) {
                 for (int i = 0; i < jobs.length(); i++) {
                     int id = jobs.getJSONObject(i).optInt("id", -1);
@@ -121,8 +126,6 @@ public class PollingService extends Service {
             }
             firstPoll = false;
 
-            // Find jobs with ID > lastSeenId — these are genuinely new
-            // (the API returns jobs in DESC order, so newest is first)
             for (int i = 0; i < jobs.length(); i++) {
                 JSONObject j = jobs.getJSONObject(i);
                 int id = j.optInt("id", -1);
@@ -133,7 +136,6 @@ public class PollingService extends Service {
                 }
             }
 
-            // Persist the new highest ID so we won't re-notify after restart
             if (highestIdNow > lastSeenId) {
                 prefs.edit().putInt(MainActivity.KEY_LAST_SEEN_ID, highestIdNow).apply();
             }
@@ -151,26 +153,42 @@ public class PollingService extends Service {
         PendingIntent pi = PendingIntent.getActivity(this, 0, openAppIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        Uri sound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+        boolean soundEnabled = prefs.getBoolean(NotificationSettingsActivity.KEY_SOUND_ENABLED, true);
+        boolean vibrateEnabled = prefs.getBoolean(NotificationSettingsActivity.KEY_VIBRATE_ENABLED, true);
 
-        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID_ALERTS)
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, currentAlertChannelId)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentTitle("🔔 New Job: $" + payment)
                 .setContentText(title.length() > 100 ? title.substring(0, 100) + "..." : title)
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(title))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setVibrate(new long[]{0, 300, 100, 300, 100, 600})
-                .setSound(sound)
                 .setLights(0xFF00F2FE, 1000, 500)
                 .setAutoCancel(true)
                 .setContentIntent(pi);
 
+        // Pre-Oreo: set sound/vibrate on notification (channel handles it on Oreo+)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            if (soundEnabled) {
+                b.setSound(getCurrentSoundUri());
+            }
+            if (vibrateEnabled) {
+                b.setVibrate(new long[]{0, 300, 100, 300, 100, 600});
+            }
+        }
+
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        // Use job ID as notification ID — deduplicates if Android delivers same one twice
         int notifId = (int) (j.optInt("id", 0) & 0x7FFFFFFF);
         if (notifId == 0) notifId = (int) (System.currentTimeMillis() & 0x7FFFFFFF);
         nm.notify(notifId, b.build());
+    }
+
+    private Uri getCurrentSoundUri() {
+        String saved = prefs.getString(NotificationSettingsActivity.KEY_SOUND_URI, null);
+        if (saved != null && !saved.isEmpty()) {
+            try { return Uri.parse(saved); } catch (Exception ignored) {}
+        }
+        return RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
     }
 
     private Notification buildForegroundNotification() {
@@ -189,10 +207,9 @@ public class PollingService extends Service {
                 .build();
     }
 
-    private void createNotificationChannels() {
+    private void createForegroundChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-
             NotificationChannel fgChannel = new NotificationChannel(
                     CHANNEL_ID_FOREGROUND, "Background Service",
                     NotificationManager.IMPORTANCE_LOW);
@@ -201,25 +218,61 @@ public class PollingService extends Service {
             fgChannel.enableLights(false);
             fgChannel.enableVibration(false);
             nm.createNotificationChannel(fgChannel);
+        }
+    }
 
-            NotificationChannel alertChannel = new NotificationChannel(
-                    CHANNEL_ID_ALERTS, "Job Alerts",
-                    NotificationManager.IMPORTANCE_HIGH);
-            alertChannel.setDescription("Notifications when matching jobs are found");
-            alertChannel.enableLights(true);
-            alertChannel.setLightColor(Color.CYAN);
-            alertChannel.enableVibration(true);
+    /**
+     * Ensures the alert channel exists with current sound/vibrate settings.
+     * If the user changed settings (channel version bumped), creates a new
+     * channel ID and deletes the old one (Android channels are immutable).
+     */
+    private void ensureAlertChannel() {
+        int version = prefs.getInt(NotificationSettingsActivity.KEY_CHANNEL_VERSION, 0);
+        currentAlertChannelId = CHANNEL_ID_ALERTS_PREFIX + version;
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+
+        // If channel already exists, no-op
+        if (nm.getNotificationChannel(currentAlertChannelId) != null) return;
+
+        // Delete old versioned channels to keep settings clean
+        if (nm.getNotificationChannels() != null) {
+            for (NotificationChannel ch : nm.getNotificationChannels()) {
+                if (ch.getId().startsWith(CHANNEL_ID_ALERTS_PREFIX)
+                        && !ch.getId().equals(currentAlertChannelId)) {
+                    nm.deleteNotificationChannel(ch.getId());
+                }
+            }
+        }
+
+        // Create the fresh channel
+        NotificationChannel alertChannel = new NotificationChannel(
+                currentAlertChannelId, "Job Alerts",
+                NotificationManager.IMPORTANCE_HIGH);
+        alertChannel.setDescription("Notifications when matching jobs are found");
+        alertChannel.enableLights(true);
+        alertChannel.setLightColor(Color.CYAN);
+
+        boolean vibrate = prefs.getBoolean(NotificationSettingsActivity.KEY_VIBRATE_ENABLED, true);
+        alertChannel.enableVibration(vibrate);
+        if (vibrate) {
             alertChannel.setVibrationPattern(new long[]{0, 300, 100, 300, 100, 600});
+        }
 
+        boolean sound = prefs.getBoolean(NotificationSettingsActivity.KEY_SOUND_ENABLED, true);
+        if (sound) {
             AudioAttributes audioAttrs = new AudioAttributes.Builder()
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                     .build();
-            Uri sound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
-            alertChannel.setSound(sound, audioAttrs);
-
-            nm.createNotificationChannel(alertChannel);
+            alertChannel.setSound(getCurrentSoundUri(), audioAttrs);
+        } else {
+            alertChannel.setSound(null, null);
         }
+
+        nm.createNotificationChannel(alertChannel);
     }
 
     private void acquireWakeLock() {
@@ -238,7 +291,6 @@ public class PollingService extends Service {
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
-        // Try to restart ourselves if user is still logged in
         if (prefs != null && !prefs.getString(MainActivity.KEY_TOKEN, "").isEmpty()) {
             Intent restartIntent = new Intent(this, PollingService.class);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
