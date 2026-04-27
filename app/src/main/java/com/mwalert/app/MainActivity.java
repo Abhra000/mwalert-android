@@ -449,6 +449,8 @@ public class MainActivity extends AppCompatActivity {
         } else {
             startService(serviceIntent);
         }
+        // Schedule AlarmManager watchdog — ensures service restarts even if killed
+        PollingService.scheduleKeepaliveAlarm(this);
     }
 
     private void requestBatteryOptOff() {
