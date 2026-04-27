@@ -1,12 +1,15 @@
 package com.mwalert.app;
 
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.media.AudioAttributes;
@@ -16,6 +19,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.os.SystemClock;
 
 import androidx.core.app.NotificationCompat;
 
@@ -25,13 +29,16 @@ import org.json.JSONObject;
 public class PollingService extends Service {
 
     private static final String CHANNEL_ID_FOREGROUND = "mwalert_foreground";
-    // Channel for alerts — versioned so we can recreate when sound/vibrate settings change
     private static final String CHANNEL_ID_ALERTS_PREFIX = "mwalert_alerts_v";
     private static final int FOREGROUND_NOTIFICATION_ID = 1;
     private static final long POLL_INTERVAL_MS = 6000;             // 6 sec
     private static final long URL_REFRESH_INTERVAL_MS = 300_000;   // 5 min
 
-    // CONFIG SOURCE — must match MainActivity.CONFIG_URL
+    // AlarmManager keep-alive action
+    public static final String ACTION_KEEPALIVE = "com.mwalert.app.KEEPALIVE";
+    // Interval for AlarmManager watchdog (30 seconds)
+    private static final long ALARM_INTERVAL_MS = 30_000;
+
     private static final String CONFIG_URL = "https://mw-alert.netlify.app/config.json";
 
     private Handler handler;
@@ -42,6 +49,9 @@ public class PollingService extends Service {
 
     private boolean firstPoll = true;
     private String currentAlertChannelId;
+
+    // ── Watchdog receiver: restarts the service if Android kills it ──
+    private BroadcastReceiver keepAliveReceiver;
 
     @Override
     public void onCreate() {
@@ -54,13 +64,26 @@ public class PollingService extends Service {
         handler = new Handler();
         pollRunnable = this::pollAndReschedule;
         urlRefreshRunnable = this::refreshUrlAndReschedule;
+
+        // Register the local keepalive receiver
+        keepAliveReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                // Service is still alive — reschedule next alarm
+                scheduleKeepaliveAlarm(context);
+            }
+        };
+        IntentFilter filter = new IntentFilter(ACTION_KEEPALIVE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(keepAliveReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(keepAliveReceiver, filter);
+        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // Re-check alert channel each time service starts (in case user changed settings)
         ensureAlertChannel();
-
         startForeground(FOREGROUND_NOTIFICATION_ID, buildForegroundNotification());
 
         handler.removeCallbacks(pollRunnable);
@@ -69,7 +92,37 @@ public class PollingService extends Service {
         handler.removeCallbacks(urlRefreshRunnable);
         handler.postDelayed(urlRefreshRunnable, URL_REFRESH_INTERVAL_MS);
 
+        // Schedule AlarmManager watchdog to keep service alive
+        scheduleKeepaliveAlarm(this);
+
         return START_STICKY;
+    }
+
+    /**
+     * Schedules a repeating AlarmManager alarm that will restart this service
+     * even if Android kills it due to memory pressure or battery optimization.
+     */
+    public static void scheduleKeepaliveAlarm(Context context) {
+        AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+        Intent intent = new Intent(context, KeepAliveReceiver.class);
+        PendingIntent pi = PendingIntent.getBroadcast(
+                context, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        if (am == null) return;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // setExactAndAllowWhileIdle fires even in Doze mode
+            am.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + ALARM_INTERVAL_MS,
+                    pi);
+        } else {
+            am.setExact(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + ALARM_INTERVAL_MS,
+                    pi);
+        }
     }
 
     private void pollAndReschedule() {
@@ -97,7 +150,6 @@ public class PollingService extends Service {
     }
 
     private void poll() {
-        // Re-check alert channel — user may have changed sound while service runs
         ensureAlertChannel();
 
         String token = prefs.getString(MainActivity.KEY_TOKEN, "");
@@ -167,14 +219,9 @@ public class PollingService extends Service {
                 .setAutoCancel(true)
                 .setContentIntent(pi);
 
-        // Pre-Oreo: set sound/vibrate on notification (channel handles it on Oreo+)
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            if (soundEnabled) {
-                b.setSound(getCurrentSoundUri());
-            }
-            if (vibrateEnabled) {
-                b.setVibrate(new long[]{0, 300, 100, 300, 100, 600});
-            }
+            if (soundEnabled) b.setSound(getCurrentSoundUri());
+            if (vibrateEnabled) b.setVibrate(new long[]{0, 300, 100, 300, 100, 600});
         }
 
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -221,11 +268,6 @@ public class PollingService extends Service {
         }
     }
 
-    /**
-     * Ensures the alert channel exists with current sound/vibrate settings.
-     * If the user changed settings (channel version bumped), creates a new
-     * channel ID and deletes the old one (Android channels are immutable).
-     */
     private void ensureAlertChannel() {
         int version = prefs.getInt(NotificationSettingsActivity.KEY_CHANNEL_VERSION, 0);
         currentAlertChannelId = CHANNEL_ID_ALERTS_PREFIX + version;
@@ -233,11 +275,8 @@ public class PollingService extends Service {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
 
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-
-        // If channel already exists, no-op
         if (nm.getNotificationChannel(currentAlertChannelId) != null) return;
 
-        // Delete old versioned channels to keep settings clean
         if (nm.getNotificationChannels() != null) {
             for (NotificationChannel ch : nm.getNotificationChannels()) {
                 if (ch.getId().startsWith(CHANNEL_ID_ALERTS_PREFIX)
@@ -247,7 +286,6 @@ public class PollingService extends Service {
             }
         }
 
-        // Create the fresh channel
         NotificationChannel alertChannel = new NotificationChannel(
                 currentAlertChannelId, "Job Alerts",
                 NotificationManager.IMPORTANCE_HIGH);
@@ -257,9 +295,7 @@ public class PollingService extends Service {
 
         boolean vibrate = prefs.getBoolean(NotificationSettingsActivity.KEY_VIBRATE_ENABLED, true);
         alertChannel.enableVibration(vibrate);
-        if (vibrate) {
-            alertChannel.setVibrationPattern(new long[]{0, 300, 100, 300, 100, 600});
-        }
+        if (vibrate) alertChannel.setVibrationPattern(new long[]{0, 300, 100, 300, 100, 600});
 
         boolean sound = prefs.getBoolean(NotificationSettingsActivity.KEY_SOUND_ENABLED, true);
         if (sound) {
@@ -289,20 +325,32 @@ public class PollingService extends Service {
         handler.removeCallbacks(pollRunnable);
         handler.removeCallbacks(urlRefreshRunnable);
         if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
+            try { wakeLock.release(); } catch (Exception ignored) {}
         }
+        try {
+            if (keepAliveReceiver != null) unregisterReceiver(keepAliveReceiver);
+        } catch (Exception ignored) {}
+
+        // Self-restart immediately if user is still logged in
         if (prefs != null && !prefs.getString(MainActivity.KEY_TOKEN, "").isEmpty()) {
-            Intent restartIntent = new Intent(this, PollingService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(restartIntent);
-            } else {
-                startService(restartIntent);
+            // Schedule alarm to restart in 5 seconds
+            AlarmManager am = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            Intent restartIntent = new Intent(this, KeepAliveReceiver.class);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    this, 1, restartIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            if (am != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                            SystemClock.elapsedRealtime() + 5000, pi);
+                } else {
+                    am.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                            SystemClock.elapsedRealtime() + 5000, pi);
+                }
             }
         }
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
+    public IBinder onBind(Intent intent) { return null; }
 }
