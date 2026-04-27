@@ -162,6 +162,22 @@ public class MainActivity extends AppCompatActivity {
         statusText.setBackgroundColor(0x1A4ADE80);
         dashboardLayout.addView(statusText);
 
+        // === BELL ICON / NOTIFICATION SETTINGS BUTTON ===
+        Button bellBtn = new Button(this);
+        bellBtn.setText("🔔  Notification Settings");
+        bellBtn.setTextColor(0xFFFFFFFF);
+        bellBtn.setBackgroundColor(0xFF302B63);
+        bellBtn.setTextSize(15);
+        LinearLayout.LayoutParams bellP = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 130);
+        bellP.setMargins(0, 14, 0, 0);
+        bellBtn.setLayoutParams(bellP);
+        bellBtn.setOnClickListener(v -> {
+            Intent settingsIntent = new Intent(this, NotificationSettingsActivity.class);
+            startActivity(settingsIntent);
+        });
+        dashboardLayout.addView(bellBtn);
+
         TextView jobsHeader = new TextView(this);
         jobsHeader.setText("\nRECENT MATCHED JOBS\n");
         jobsHeader.setTextSize(13);
@@ -341,6 +357,17 @@ public class MainActivity extends AppCompatActivity {
                         .put("password", password)
                         .toString();
                 String resp = ApiHelper.post(apiBase + "/api/login", body, null);
+
+                // If we get HTML back, it's likely the ngrok warning page
+                if (resp.trim().startsWith("<")) {
+                    runOnUiThread(() -> {
+                        msgText.setText("Server returned HTML — visit ngrok URL once in browser to bypass warning");
+                        msgText.setTextColor(0xFFFF6B6B);
+                        loginBtn.setEnabled(true);
+                    });
+                    return;
+                }
+
                 JSONObject json = new JSONObject(resp);
 
                 if (json.has("token")) {
