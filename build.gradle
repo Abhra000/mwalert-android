@@ -1,4 +1,5 @@
-// Top-level build file
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
 buildscript {
     repositories {
         google()
@@ -6,6 +7,8 @@ buildscript {
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.2.0'
+        // Google services plugin — required for Firebase to read google-services.json
+        classpath 'com.google.gms:google-services:4.4.2'
     }
 }
 
