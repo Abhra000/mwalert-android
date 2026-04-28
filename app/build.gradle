@@ -1,4 +1,6 @@
 apply plugin: 'com.android.application'
+// Apply the Google services plugin — pulls in google-services.json
+apply plugin: 'com.google.gms.google-services'
 
 android {
     namespace 'com.mwalert.app'
@@ -9,12 +11,13 @@ android {
         minSdk 24
         targetSdk 34
         versionCode 1
-        versionName "1.0.0"
+        versionName "1.0"
     }
 
     buildTypes {
         release {
             minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 
@@ -27,7 +30,11 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.core:core:1.12.0'
-    implementation 'androidx.work:work-runtime:2.9.0'
+    implementation 'com.google.android.material:material:1.11.0'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    implementation 'org.json:json:20231013'
+
+    // ===== Firebase Cloud Messaging (FCM) =====
+    // Firebase BoM keeps all Firebase SDKs at compatible versions.
+    implementation platform('com.google.firebase:firebase-bom:33.5.1')
+    implementation 'com.google.firebase:firebase-messaging'
 }
