@@ -31,6 +31,7 @@ public class MainActivity extends AppCompatActivity {
     public static final String KEY_SERVER = "server";
     public static final String KEY_EMAIL = "email";
     public static final String KEY_LAST_SEEN_ID = "last_seen_job_id";
+    public static final String KEY_FCM_TOKEN = "fcm_token";
 
     // === HARDCODED CONFIG SOURCE ===
     // The APK fetches the current ngrok URL from this Netlify URL's config.json.
@@ -397,6 +398,9 @@ public class MainActivity extends AppCompatActivity {
                         loginBtn.setEnabled(true);
                         showDashboard();
                     });
+                    // Register this device for FCM push notifications.
+                    // Runs in background — login UX isn't blocked by it.
+                    registerFcmToken(token);
                 } else {
                     String err = json.optString("error", "Login failed");
                     runOnUiThread(() -> {
@@ -484,6 +488,43 @@ public class MainActivity extends AppCompatActivity {
             return out.format(d);
         } catch (Exception e) {
             return utcStr;
+        }
+    }
+
+    /**
+     * Get this device's FCM token from Firebase, then register it with our
+     * scraper so we can be pushed-to. Runs async — login flow isn't blocked.
+     * Called after every successful login (and is idempotent server-side).
+     */
+    private void registerFcmToken(String authToken) {
+        try {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().getToken()
+                .addOnCompleteListener(task -> {
+                    if (!task.isSuccessful() || task.getResult() == null) {
+                        // Firebase isn't ready or no Play Services — silent fallback to polling
+                        return;
+                    }
+                    String fcmToken = task.getResult();
+                    prefs.edit().putString(KEY_FCM_TOKEN, fcmToken).apply();
+
+                    String server = prefs.getString(KEY_SERVER, "");
+                    if (server.isEmpty()) return;
+                    String apiBase = ApiHelper.buildApiBase(server);
+
+                    new Thread(() -> {
+                        try {
+                            String body = new JSONObject()
+                                    .put("fcm_token", fcmToken)
+                                    .put("platform", "android")
+                                    .toString();
+                            ApiHelper.post(apiBase + "/api/register-token", body, authToken);
+                        } catch (Exception ignored) {
+                            // Push registration failed — polling fallback still works
+                        }
+                    }).start();
+                });
+        } catch (Exception e) {
+            // Firebase not available (e.g. no Play Services) — silent fallback
         }
     }
 
@@ -616,9 +657,26 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void logout() {
+        // Unregister FCM token so this device stops receiving pushes
+        final String authToken = prefs.getString(KEY_TOKEN, "");
+        final String fcmToken = prefs.getString(KEY_FCM_TOKEN, "");
+        final String server = prefs.getString(KEY_SERVER, "");
+        if (!authToken.isEmpty() && !fcmToken.isEmpty() && !server.isEmpty()) {
+            new Thread(() -> {
+                try {
+                    String apiBase = ApiHelper.buildApiBase(server);
+                    String body = new JSONObject()
+                            .put("fcm_token", fcmToken)
+                            .toString();
+                    ApiHelper.post(apiBase + "/api/unregister-token", body, authToken);
+                } catch (Exception ignored) {}
+            }).start();
+        }
+
         prefs.edit()
                 .remove(KEY_TOKEN)
                 .remove(KEY_LAST_SEEN_ID)
+                .remove(KEY_FCM_TOKEN)
                 .apply();
         stopService(new Intent(this, PollingService.class));
         refreshHandler.removeCallbacks(refreshRunnable);
