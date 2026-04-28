@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "215111790641",
+    "project_id": "mw-alert",
+    "storage_bucket": "mw-alert.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:215111790641:android:9a6865f96240457cce2510",
+        "android_client_info": {
+          "package_name": "com.mwalert.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCrFlBCSbF5Fpgr8M4Sdqt0geGkyhpOgTI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
