@@ -39,7 +39,7 @@ public class PollingService extends Service {
     // Interval for AlarmManager watchdog (30 seconds)
     private static final long ALARM_INTERVAL_MS = 30_000;
 
-    private static final String CONFIG_URL = "https://mw-alert.netlify.app/config.json";
+    private static final String CONFIG_URL = "https://mw-alert.pages.dev/config.json";
 
     private Handler handler;
     private Runnable pollRunnable;
