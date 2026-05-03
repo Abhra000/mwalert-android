@@ -36,7 +36,7 @@ public class MainActivity extends AppCompatActivity {
     // === HARDCODED CONFIG SOURCE ===
     // The APK fetches the current ngrok URL from this Netlify URL's config.json.
     // Update CONFIG_URL below to YOUR Netlify domain.
-    private static final String CONFIG_URL = "https://mw-alert.netlify.app/config.json";
+    private static final String CONFIG_URL = "https://mw-alert.pages.dev/config.json";
 
     private SharedPreferences prefs;
     private LinearLayout loginLayout;
