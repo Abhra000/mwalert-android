@@ -305,7 +305,7 @@ public class MainActivity extends AppCompatActivity {
             try {
                 String resp = ApiHelper.getRaw(CONFIG_URL);
                 JSONObject json = new JSONObject(resp);
-                String server = json.optString("server", "").trim();
+                String server = json.optString("server_url", json.optString("server_url", optString("server_url", optString("server_url", optString("server_url", optString("server_url", json.optString("server", ""))))))).trim();
                 if (server.length() > 0) {
                     prefs.edit().putString(KEY_SERVER, server).apply();
                     runOnUiThread(() -> {
@@ -347,7 +347,7 @@ public class MainActivity extends AppCompatActivity {
             try {
                 String resp = ApiHelper.getRaw(CONFIG_URL);
                 JSONObject json = new JSONObject(resp);
-                server = json.optString("server", "").trim();
+                server = json.optString("server_url", optString("server_url",optString("server_url", optString("server_url", optString("server_url", optString("server_url", json.optString("server", ""))))))).trim();
             } catch (Exception ignored) {}
 
             if (server.isEmpty()) {

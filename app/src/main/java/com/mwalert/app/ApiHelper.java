@@ -28,11 +28,9 @@ public class ApiHelper {
         while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
 
         // ngrok always uses HTTPS on 443 — strip any port
-        if (s.contains("ngrok")) {
-            int colon = s.indexOf(':');
-            if (colon > 0) s = s.substring(0, colon);
-            return "https://" + s;
-        }
+        int colon = s.indexOf(':');
+        if (colon > 0) s = s.substring(0, colon);
+        return "https://" + s;
         return "http://" + s;
     }
 

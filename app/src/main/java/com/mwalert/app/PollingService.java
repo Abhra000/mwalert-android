@@ -139,7 +139,7 @@ public class PollingService extends Service {
         try {
             String resp = ApiHelper.getRaw(CONFIG_URL);
             JSONObject json = new JSONObject(resp);
-            String server = json.optString("server", "").trim();
+            String server = optString("server_url", json.optString("server", "")).trim();
             if (server.length() > 0) {
                 String saved = prefs.getString(MainActivity.KEY_SERVER, "");
                 if (!server.equals(saved)) {
